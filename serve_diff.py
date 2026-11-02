@@ -151,7 +151,7 @@ def read_notes():
     """Every recorded comment, numbered: a row written before the cursor existed is numbered by its position."""
     if not NOTES.exists():
         return []
-    rows = [json.loads(line) for line in NOTES.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in NOTES.read_text(encoding="utf-8").splitlines() if line.strip()]
     for index, row in enumerate(rows, start=1):
         row.setdefault("seq", index)
         row.setdefault("batch", 0)
@@ -609,9 +609,9 @@ def serve_payload(payload):
     """Make this payload the served one: the numbers it names are remembered, then it and the page are written."""
     remembered_pulls(payload["branches"])
     Serving.decor = payload["decor"]
-    DATA.write_text(json.dumps(payload, separators=(",", ":")))
+    DATA.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     if TEMPLATE.exists():
-        PAGE.write_text(gen_diff_data.render_page(TEMPLATE.read_text(), payload))
+        PAGE.write_text(gen_diff_data.render_page(TEMPLATE.read_text(encoding="utf-8"), payload), encoding="utf-8")
 
 
 def redecorate(key):
@@ -623,7 +623,7 @@ def redecorate(key):
     with BUILDING:
         if not DATA.exists():
             return
-        payload = json.loads(DATA.read_text())
+        payload = json.loads(DATA.read_text(encoding="utf-8"))
         if gen_diff_data.decorate(payload):
             serve_payload(payload)
             print(f"REDECORATED on {key}", flush=True)
@@ -860,7 +860,7 @@ def reader():
     if not DATA.exists():
         return ""
     try:
-        return json.loads(DATA.read_text()).get("viewer") or ""
+        return json.loads(DATA.read_text(encoding="utf-8")).get("viewer") or ""
     except json.JSONDecodeError:
         return ""
 
@@ -916,13 +916,13 @@ def touched(rows, row, by):
 
 def read_ticks():
     """Which files have been read, as `<review> <path>` against the digest of the diff they were read at."""
-    return json.loads(TICKS.read_text()) if TICKS.exists() else {}
+    return json.loads(TICKS.read_text(encoding="utf-8")) if TICKS.exists() else {}
 
 
 def write_ticks(marks):
     """Replace the ticks in one step, so a reader never sees them half-written."""
     spare = TICKS.with_suffix(".writing")
-    spare.write_text(json.dumps(marks, indent=1, sort_keys=True))
+    spare.write_text(json.dumps(marks, indent=1, sort_keys=True), encoding="utf-8")
     os.replace(spare, TICKS)
 
 
@@ -947,7 +947,7 @@ def remembered_pulls(branches):
     a review read once as `#3237` would read as an untouched branch afterwards. So a number, once seen for a ref, is the
     ref's number until another one is seen for it.
     """
-    known = json.loads(PULLS.read_text()) if PULLS.exists() else {}
+    known = json.loads(PULLS.read_text(encoding="utf-8")) if PULLS.exists() else {}
     learnt = dict(known)
     for branch in branches:
         if branch["pr"]:
@@ -956,14 +956,14 @@ def remembered_pulls(branches):
             branch["pr"] = known[branch["ref"]]
     if learnt != known:
         spare = PULLS.with_suffix(".writing")
-        spare.write_text(json.dumps(learnt, indent=1, sort_keys=True))
+        spare.write_text(json.dumps(learnt, indent=1, sort_keys=True), encoding="utf-8")
         os.replace(spare, PULLS)
 
 
 def write_notes(rows):
     """Replace the log in one step, so a reader never sees it half-written."""
     spare = NOTES.with_suffix(".writing")
-    spare.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    spare.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     os.replace(spare, NOTES)
 
 
@@ -1106,7 +1106,11 @@ class Handler(BaseHTTPRequestHandler):
         old_rev = query.get("oldrev", [""])[0]
         old_from = int(query.get("oldfrom", ["0"])[0])
         anchors = json.loads(query.get("anchors", ["[]"])[0])
-        text = gen_diff_data.run(root, "show", f"{rev}:{name}") if rev else (root / name).read_text()
+        text = (
+            gen_diff_data.run(root, "show", f"{rev}:{name}")
+            if rev
+            else (root / name).read_text(encoding="utf-8", errors="replace")
+        )
         rows = text.split("\n")
         if rows and rows[-1] == "":
             rows.pop()

@@ -50,7 +50,13 @@ def refresh():
 
     def git(*words, quiet=False):
         done = subprocess.run(
-            ["git", "-C", str(here), *words], capture_output=True, text=True, timeout=120, check=False
+            ["git", "-C", str(here), *words],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            check=False,
         )
         if done.returncode != 0 and not quiet:
             print(f"not updated: git {words[0]} said {' '.join((done.stderr or done.stdout).split())[:120]}")
@@ -160,16 +166,16 @@ def heard_upto(branches=()):
     kept = gen_diff_data.home() / "watched.json"
     if not kept.exists():
         return None
-    held = json.loads(kept.read_text())
+    held = json.loads(kept.read_text(encoding="utf-8"))
     return held.get(watched_key(branches))
 
 
 def stop_at(event, desk=None, branches=()):
     kept = gen_diff_data.home() / "watched.json"
-    held = json.loads(kept.read_text()) if kept.exists() else {}
+    held = json.loads(kept.read_text(encoding="utf-8")) if kept.exists() else {}
     held[watched_key(branches)] = event
     held["desk"] = desk if desk is not None else held.get("desk")
-    kept.write_text(json.dumps(held))
+    kept.write_text(json.dumps(held), encoding="utf-8")
 
 
 def serving():
@@ -181,7 +187,7 @@ def serving():
 def armed_against():
     """The run of the desk the last watch was armed against."""
     kept = gen_diff_data.home() / "watched.json"
-    return json.loads(kept.read_text()).get("desk") if kept.exists() else None
+    return json.loads(kept.read_text(encoding="utf-8")).get("desk") if kept.exists() else None
 
 
 PULL_REF = re.compile(r"^refs/diffdesk/pull/(\d+)$")
@@ -271,9 +277,9 @@ def serve(args):
     if not payload["branches"]:
         sys.exit(f"nothing ahead of {args.base} in {args.dir}")
     home = gen_diff_data.home()
-    (home / "diff_data.json").write_text(json.dumps(payload, separators=(",", ":")))
-    template = (HERE / "diff_desk_template.html").read_text()
-    (home / "diff_desk.html").write_text(gen_diff_data.render_page(template, payload))
+    (home / "diff_data.json").write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    template = (HERE / "diff_desk_template.html").read_text(encoding="utf-8")
+    (home / "diff_desk.html").write_text(gen_diff_data.render_page(template, payload), encoding="utf-8")
     _said(payload)
     serve_diff.main(serve_diff.Source(args.dir, args.base, args.refs), started_by=args.owner or None)
 

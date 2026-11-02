@@ -28,7 +28,9 @@ def home():
 
 def run(root, *args):
     """Ask git something. A command that fails answers with nothing, which every caller reads as absence."""
-    return subprocess.run(["git", *args], capture_output=True, text=True, cwd=root, check=False).stdout
+    return subprocess.run(
+        ["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=root, check=False
+    ).stdout
 
 
 # What gh says when the call never left this machine: nothing resolved, nothing connected, no handshake made. GitHub
@@ -80,7 +82,15 @@ def gh(*args, repeatable, given=None, cwd=None, budget=120):
         left = max(1.0, ends - time.monotonic())
         try:
             told = subprocess.run(
-                words, input=given, capture_output=True, text=True, cwd=cwd, timeout=left, check=False
+                words,
+                input=given,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=cwd,
+                timeout=left,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             told = subprocess.CompletedProcess(words, 1, "", f"no answer from GitHub within {budget:g}s")
@@ -218,6 +228,8 @@ def fetch_pull(root, upstream, number):
         ["git", "fetch", "--quiet", f"https://github.com/{upstream}.git", f"+refs/pull/{number}/head:{local}"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=root,
         timeout=300,
         check=False,
@@ -273,7 +285,7 @@ def render_page(template, payload):
     """
     body = json.dumps(payload, separators=(",", ":")).replace("</script", "<\\/script")
     stamp = time.strftime("built %H:%M:%S")
-    grammar = (pathlib.Path(__file__).parent / "vendor" / "highlight.min.js").read_text()
+    grammar = (pathlib.Path(__file__).parent / "vendor" / "highlight.min.js").read_text(encoding="utf-8")
     return template.replace("__DIFF_DATA__", body).replace("__HIGHLIGHT__", grammar).replace("__BUILD__", stamp)
 
 
@@ -306,7 +318,7 @@ def file_text(root, rev, path):
     if rev:
         return run(root, "show", f"{rev}:{path}")
     file = pathlib.Path(root) / path
-    return file.read_text(errors="replace") if file.is_file() else ""
+    return file.read_text(encoding="utf-8", errors="replace") if file.is_file() else ""
 
 
 def mark_strings(root, files, old_rev, new_rev):
@@ -549,9 +561,9 @@ def collect(root, base, refs):
 if __name__ == "__main__":
     payload = collect(os.environ.get("DIFF_ROOT", "."), os.environ.get("DIFF_BASE", "upstream/main"), sys.argv[1:])
     out = home() / "diff_data.json"
-    out.write_text(json.dumps(payload, separators=(",", ":")))
+    out.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     template = pathlib.Path(__file__).parent / "diff_desk_template.html"
-    (home() / "diff_desk.html").write_text(render_page(template.read_text(), payload))
+    (home() / "diff_desk.html").write_text(render_page(template.read_text(encoding="utf-8"), payload), encoding="utf-8")
     print(f"{sum(len(b['files']) for b in payload['branches'])} file diffs, ", end="")
     print(f"{sum(len(b['commits']) for b in payload['branches'])} commits, upstream {payload['upstream'] or '(none)'}")
     print("bytes:", out.stat().st_size)
