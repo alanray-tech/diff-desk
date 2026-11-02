@@ -123,6 +123,15 @@ def carried(item, indent):
         print(f"{indent}{serve_diff.MEDIA / image['file']} ({image['name']}, {where})", flush=True)
 
 
+def written_on(note):
+    """The commit a remark was written on, as `@abc1234`: alone for a single commit's view, `+wip` where the whole
+    branch was read with the work saved on disk, `..` where it was read whole at that tip."""
+    if not note.get("commit"):
+        return ""
+    mark = {"commit": "", "worktree": "+wip"}.get(note.get("scope"), "..")
+    return f"@{note['commit']}{mark}"
+
+
 def show(note, since=None):
     text = " ".join(str(note.get("text", "")).split())
     marks = [note.get("state", "open")]
@@ -133,7 +142,9 @@ def show(note, since=None):
     # Flushed as it goes: a watch that keeps running holds its output in a buffer otherwise, and a session reading
     # along sees a heading with nothing under it.
     print(
-        f"[{note['seq']}] {note.get('branch', '?')} {note['path']}:{span(note)} ({note.get('side')}) {text}", flush=True
+        f"[{note['seq']}] {note.get('branch', '?')}{written_on(note)} {note['path']}:{span(note)} ({note.get('side')}) "
+        f"{text}",
+        flush=True,
     )
     print(f"      {' | '.join(marks)}", flush=True)
     carried(note, "      ")
@@ -377,12 +388,19 @@ def watch(args):
     print("nothing said within the timeout")
 
 
+def same_commit(one, other):
+    return one.startswith(other) or other.startswith(one)
+
+
 def comments(args):
     rows = ask("/comments")
     if rows is None:
         sys.exit("nothing is serving")
     rows = rows if args.all else [row for row in rows if row.get("state") == "open"]
-    print(f"{len(rows)} comment(s){'' if args.all else ' unresolved'}")
+    if args.commit:
+        # A short sha is as long as git made it, so either side may be the longer.
+        rows = [row for row in rows if row.get("commit") and same_commit(row["commit"], args.commit)]
+    print(f"{len(rows)} comment(s){'' if args.all else ' unresolved'}{f' on {args.commit}' if args.commit else ''}")
     for note in rows:
         show(note)
 
@@ -549,6 +567,7 @@ job.set_defaults(run=watch)
 
 job = jobs.add_parser("comments", help="what has been submitted")
 job.add_argument("--all", action="store_true", help="include the ones already addressed")
+job.add_argument("--commit", default="", help="only the ones written on this commit")
 job.set_defaults(run=comments)
 
 job = jobs.add_parser("publish", help="send the named comments to the pull request")

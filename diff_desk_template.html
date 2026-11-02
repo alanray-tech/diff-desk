@@ -1098,10 +1098,11 @@
   <div class="head">
     <strong>Comments</strong>
     <span class="status" id="logcount"></span>
-    <label class="seen" id="logorder" title="Read the list by the submission each remark went out in, or by what moved last">
+    <label class="seen" id="logorder" title="Read the list by the submission each remark went out in, by the commit it was written on, or by what moved last">
       <span>Group by</span>
       <select id="logsort">
         <option value="batch">batch</option>
+        <option value="commit">commit</option>
         <option value="thread">thread</option>
       </select>
     </label>
@@ -1259,7 +1260,7 @@
     els.log.dataset.open = String(Boolean(choices.log));
     els.logunread.checked = Boolean(choices.unread);
     els.logresolved.checked = Boolean(choices.resolved);
-    els.logsort.value = choices.sort === "thread" ? "thread" : "batch";
+    els.logsort.value = ["thread", "commit"].includes(choices.sort) ? choices.sort : "batch";
     els.hidedone.setAttribute("aria-pressed", String(Boolean(choices.hideDone)));
     document.body.classList.toggle("hide-done", Boolean(choices.hideDone));
     els.hidefiles.setAttribute("aria-pressed", String(Boolean(choices.hideFiles)));
@@ -1877,20 +1878,14 @@
       if (!moved.length) drawEmpty(all);
       return;
     }
-    const batches = new Map();
-    for (const note of rows) {
-      if (!batches.has(note.batch)) batches.set(note.batch, []);
-      batches.get(note.batch).push(note);
-    }
-    // Newest batch first, since the last thing said is what a reader comes back for; inside one, in the order it was
-    // written, which is the order it is read in.
-    for (const [id, held] of [...batches].reverse()) {
+    const groups = els.logsort.value === "commit" ? byCommit(rows) : byBatch(rows);
+    for (const [label, held] of groups) {
       const group = document.createElement("div");
       group.className = "batch";
       const title = document.createElement("div");
       title.className = "batchhead";
       const name = document.createElement("b");
-      name.textContent = id ? `batch ${id}` : "earlier";
+      name.textContent = label;
       const size = document.createElement("span");
       size.className = "said";
       size.textContent = `${held.length} comment${held.length === 1 ? "" : "s"}`;
@@ -1903,6 +1898,46 @@
       }
     }
     if (!rows.length) drawEmpty(all);
+  }
+
+  // Newest batch first, since the last thing said is what a reader comes back for; inside one, in the order it was
+  // written, which is the order it is read in.
+  function byBatch(rows) {
+    const batches = new Map();
+    for (const note of rows) {
+      if (!batches.has(note.batch)) batches.set(note.batch, []);
+      batches.get(note.batch).push(note);
+    }
+    return [...batches].reverse().map(([id, held]) => [id ? `batch ${id}` : "earlier", held]);
+  }
+
+  // By the commit each remark was written on, the branch's latest commit first. A remark written on the whole branch
+  // is filed under the tip it was read at, beside the remarks on that commit alone; one written before remarks
+  // recorded their commit is kept apart rather than guessed at.
+  function byCommit(rows) {
+    const order = branch().commits.map((commit) => commit.sha);
+    const subjects = new Map(branch().commits.map((commit) => [commit.sha, commit.subject]));
+    const groups = new Map();
+    for (const note of rows) {
+      const key = note.commit ? `${note.commit} ${note.scope === "commit" ? "commit" : note.scope}` : "";
+      if (!groups.has(key)) groups.set(key, { note, held: [] });
+      groups.get(key).held.push(note);
+    }
+    const rank = ({ note }) => {
+      if (!note.commit) return [-2, 0];
+      return [order.indexOf(note.commit), note.scope === "commit" ? 0 : 1];
+    };
+    const label = ({ note }) => {
+      if (!note.commit) return "before commits were recorded";
+      if (note.scope === "commit") return `${note.commit} ${subjects.get(note.commit) || ""}`.trim();
+      return `whole branch at ${note.commit}${note.scope === "worktree" ? " + work on disk" : ""}`;
+    };
+    return [...groups.values()]
+      .sort((one, other) => {
+        const [a, b] = [rank(one), rank(other)];
+        return b[0] - a[0] || a[1] - b[1];
+      })
+      .map((group) => [label(group), group.held]);
   }
 
   function drawEmpty(all) {
@@ -2406,6 +2441,7 @@
       batch.push({
         branch: branch().ref,
         review: review(),
+        ...writtenOn(),
         path: "(review)",
         line: 0,
         side: "new",
@@ -3287,6 +3323,7 @@
     const written = () => ({
       branch: branch().ref,
       review: review(),
+      ...writtenOn(),
       path: file.path,
       line: 0,
       side: "file",
@@ -3358,6 +3395,7 @@
     const written = () => ({
       branch: branch().ref,
       review: review(),
+      ...writtenOn(),
       path,
       line,
       endLine,
@@ -3757,6 +3795,13 @@
   }
 
   const view = () => (state.scope === "all" ? { files: branch().files, commit: null } : { files: branch().commits[Number(state.scope)].files, commit: branch().commits[Number(state.scope)] });
+  // The commit a remark was written on: the one being read in a single-commit view, the branch's tip in the whole
+  // one, where the checked-out branch also carries the work saved on disk.
+  const writtenOn = () => {
+    const { commit } = view();
+    if (commit) return { commit: commit.sha, scope: "commit" };
+    return { commit: branch().tip, scope: branch().dirty ? "worktree" : "branch" };
+  };
 
   function visible(files) {
     const query = state.query.trim().toLowerCase();

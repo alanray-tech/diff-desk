@@ -223,6 +223,26 @@ def test_either_side_can_reply_without_closing_the_thread(desk):
     assert desk.post("/reply", {"seq": 99999, "text": "nowhere"})["ok"] is False
 
 
+def test_a_comment_says_which_commit_it_was_written_on(desk):
+    tip = gen_diff_data.run(desk.repo, "rev-parse", "--short", "feature").strip()
+    # Recorded through the API with nothing said about it: written on the branch as it is served, read whole.
+    bare = desk.post("/comments", {"branch": "feature", "path": "sample.py", "line": 8, "side": "new", "text": "bare"})
+    # The page says which commit it was reading, and that stands as it was said.
+    named = desk.post(
+        "/comments",
+        {"branch": "feature", "path": "sample.py", "line": 9, "side": "new", "text": "named"}
+        | {"commit": "abc1234", "scope": "commit"},
+    )
+    rows = {row["seq"]: row for row in desk.get("/comments")}
+    assert (rows[bare["seq"]]["commit"], rows[bare["seq"]]["scope"]) == (tip, "branch")
+    assert (rows[named["seq"]]["commit"], rows[named["seq"]]["scope"]) == ("abc1234", "commit")
+
+    listed = desk.cli("comments", "--commit", tip).communicate(timeout=60)[0]
+    assert f"[{bare['seq']}] feature@{tip}.. sample.py:8" in listed
+    assert "named" not in listed
+    assert f"[{named['seq']}] feature@abc1234 sample.py:9" in desk.cli("comments").communicate(timeout=60)[0]
+
+
 def test_rewriting_a_comment_or_one_of_its_replies_keeps_what_it_said_before(desk):
     made = desk.post(
         "/comments", {"branch": "feature", "path": "sample.py", "line": 12, "side": "new", "text": "first"}

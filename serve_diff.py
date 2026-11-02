@@ -1288,6 +1288,14 @@ class Handler(BaseHTTPRequestHandler):
             batch, bound = body["comments"], bool(body.get("github"))
         else:
             batch, bound = (body if isinstance(body, list) else [body]), False
+        # The commit a remark was written on, where the writer did not say: a comment recorded through the API is
+        # taken as written on its branch as it is served now.
+        served = json.loads(DATA.read_text(encoding="utf-8")) if DATA.exists() else {"branches": []}
+        tips = {entry["ref"]: entry for entry in served["branches"]}
+        for note in batch:
+            held = tips.get(note.get("branch"))
+            if held and not note.get("commit"):
+                note["commit"], note["scope"] = held["tip"], "worktree" if held.get("dirty") else "branch"
         with changing() as rows:
             seq = max((row.get("seq", 0) for row in rows), default=0)
             group = max((row.get("batch", 0) for row in rows), default=0) + 1
