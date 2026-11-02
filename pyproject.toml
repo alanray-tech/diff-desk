@@ -23,4 +23,6 @@ skip-magic-trailing-comma = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-xsv"
+# Slow tests are left out of a plain run; `-m slow` runs them alone, `-m ""` runs everything (as CI does).
+addopts = "-xsv -m 'not slow'"
+markers = ["slow: drives a real browser or waits on a stand-in service; takes seconds per test"]

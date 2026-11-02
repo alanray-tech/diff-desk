@@ -35,7 +35,8 @@ jobs:
           ruff format --diff .
 
       - name: Test
-        run: python -m pytest -p no:randomly
+        # -m "" lifts the default "not slow": CI runs the browser tests too.
+        run: python -m pytest -p no:randomly -m ""
         env:
           # The suite builds its own repository, so git needs an identity to commit with.
           GIT_AUTHOR_NAME: desk

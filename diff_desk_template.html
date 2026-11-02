@@ -2463,6 +2463,7 @@
     // Written by the reader, so read by the reader: what shows itself later is what somebody else said.
     for (const seq of recorded.seqs) heard[seq] = 0;
     keepHeard();
+    tellHost({ type: "desk:comment", seqs: recorded.seqs });
     if (bound) {
       els.trayresult.textContent = `Posting ${batch.length} to PR #${branch().pr.number}...`;
       const outcome = await post("publish", { ...where(), summary, summaryImages: carrying, seq: recorded.seqs });
@@ -4513,6 +4514,71 @@
     row.scrollIntoView({ block: "center" });
     row.classList.add("flash");
     setTimeout(() => row.classList.remove("flash"), 1600);
+  }
+
+  // Shown inside another page (agent-server's review view), the desk and that page talk by postMessage: the page
+  // hears which thread the reader is on and which remarks were just written, and asks for a thread or a line. A desk
+  // opened on its own does none of this. Both sides check where a message comes from: the page and the desk share an
+  // origin, since the desk is reached through that page's server.
+  const host = window.parent !== window ? window.parent : null;
+
+  function tellHost(message) {
+    if (host) host.postMessage({ source: "diff-desk", ...message }, location.origin);
+  }
+
+  // The card of a file named the way its asker names it: relative to another root, absolute, with backslashes. The
+  // longest path of the review that the asked path ends with, or that ends with it, is the one meant.
+  function cardFor(asked) {
+    const wanted = String(asked).replace(/\\/g, "/").replace(/^\.\//, "");
+    let best = null;
+    for (const wrap of document.querySelectorAll("section.file[data-path]")) {
+      const path = wrap.dataset.path;
+      const fits = path === wanted || wanted.endsWith(`/${path}`) || path.endsWith(`/${wanted}`);
+      if (fits && (!best || path.length > best.dataset.path.length)) best = wrap;
+    }
+    return best;
+  }
+
+  // Takes the reader to a line of a file in whichever view shows it; says whether the review holds that file.
+  function reachSpot(asked, line, side) {
+    const wrap = cardFor(asked);
+    if (!wrap) return false;
+    wrap.dataset.open = "true";
+    const held = drawn.get(wrap);
+    if (held) fillBody(wrap, held.file, held.index);
+    const row = line
+      ? wrap.querySelector(`tr[data-line="${line}"][data-side="${side || "new"}"]`) ||
+        wrap.querySelector(`tr[data-line="${line}"]`) ||
+        wrap.querySelector(`tr[data-${side || "new"}-no="${line}"]`)
+      : null;
+    if (row && row.hidden && row.dataset.fold) openFold(row.closest("tbody"), row.dataset.fold);
+    (row || wrap).scrollIntoView({ block: row ? "center" : "start" });
+    if (row) {
+      row.classList.add("flash");
+      setTimeout(() => row.classList.remove("flash"), 1600);
+    }
+    return true;
+  }
+
+  if (host) {
+    window.addEventListener("message", (event) => {
+      if (event.source !== host || event.origin !== location.origin) return;
+      const { type, id, seq, path, line, side } = event.data || {};
+      if (type === "desk:openThread") {
+        const note = mine().find((row) => row.seq === seq);
+        tellHost({ type: "desk:answer", id, ok: Boolean(note) });
+        if (note) reach(note);
+      } else if (type === "desk:goto") {
+        tellHost({ type: "desk:answer", id, ok: Boolean(path) && reachSpot(path, line, side) });
+      }
+    });
+    // A click anywhere in a thread is the reader turning to it.
+    document.addEventListener("click", (event) => {
+      const thread = event.target.closest && event.target.closest('[id^="note-"], .filenote[data-seq]');
+      const seq = thread && Number(thread.dataset.seq || thread.id.slice("note-".length));
+      if (seq) tellHost({ type: "desk:focus", seq });
+    });
+    tellHost({ type: "desk:ready" });
   }
 
   function plural(count, word) {

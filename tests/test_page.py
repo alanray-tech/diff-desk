@@ -15,6 +15,9 @@ from conftest import FIRST_EDIT, SECOND_EDIT, until
 
 playwright = pytest.importorskip("playwright.sync_api")
 
+# A browser per test, several seconds each: left out of a plain run (see pyproject.toml).
+pytestmark = pytest.mark.slow
+
 ENGINES = ("chromium", "webkit", "firefox")
 STEP = 20
 # The file the reader is on: the card whose head sits nearest the bar floating over the top of the page.
