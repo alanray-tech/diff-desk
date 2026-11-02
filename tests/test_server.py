@@ -1341,7 +1341,7 @@ def test_rescanning_switches_what_is_reviewed(desk):
     assert [branch["ref"] for branch in outcome["data"]["branches"]] == ["feature"]
     assert desk.get("/data")["branches"][0]["ref"] == "feature"
     # The page is rebuilt around the new payload, so a reload shows it without another command.
-    assert "feature" in (desk.home / "diff_desk.html").read_text()
+    assert "feature" in (desk.home / "diff_desk.html").read_text(encoding="utf-8")
 
 
 def test_serving_over_a_desk_holding_another_review_is_refused(desk):

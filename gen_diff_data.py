@@ -15,8 +15,16 @@ import tokenize
 
 
 def github():
-    """The command that talks to GitHub. Overridable so a test can answer for it without a network or a login."""
-    return shlex.split(os.environ.get("DIFF_DESK_GH", "gh"))
+    """The command that talks to GitHub. Overridable so a test can answer for it without a network or a login.
+
+    Split as the platform's own shell would: POSIX splitting reads the backslashes of a Windows path as escapes and
+    drops them, so there the words are split as they stand and only their quotes taken off.
+    """
+    said = os.environ.get("DIFF_DESK_GH", "gh")
+    if os.name != "nt":
+        return shlex.split(said)
+    words = shlex.split(said, posix=False)
+    return [word[1:-1] if len(word) > 1 and word[0] == word[-1] == '"' else word for word in words]
 
 
 def home():
@@ -95,6 +103,10 @@ def gh(*args, repeatable, given=None, cwd=None, budget=120):
         except subprocess.TimeoutExpired:
             told = subprocess.CompletedProcess(words, 1, "", f"no answer from GitHub within {budget:g}s")
             print(f"gh gave no answer within {budget:g}s", flush=True)
+            break
+        except OSError as error:
+            told = subprocess.CompletedProcess(words, 127, "", f"cannot run {words[0]}: {error}")
+            print(f"gh could not be run: {error}", flush=True)
             break
         if told.returncode == 0 or pause is None:
             break
