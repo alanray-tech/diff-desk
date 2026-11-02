@@ -1,12 +1,15 @@
 """What the collector makes of a range: the rows, the numbers they carry, and what a page is handed."""
 
+import io
+import re
 import sys
 import time
+import tokenize
 
 import pytest
 
 import gen_diff_data
-from conftest import FIRST_EDIT, SECOND_EDIT
+from conftest import FIRST_EDIT, SECOND_EDIT, git
 
 # All of these read one repository built once, and cost next to nothing to run, so they go to a single worker of a
 # parallel run rather than having several build that repository over again.
@@ -225,6 +228,80 @@ def test_a_branch_the_base_has_taken_in_is_not_offered_again(repo):
         gen_diff_data.run(repo, "checkout", "-q", "--", "sample.py")
         gen_diff_data.run(repo, "checkout", "-q", "main")
         gen_diff_data.run(repo, "reset", "-q", "--hard", "HEAD~1")
+
+
+def test_checking_out_another_branch_moves_the_stamp(repo):
+    # The branch checked out is read from disk and the others from their refs, so a checkout changes the diffs while
+    # every tip stands where it stood.
+    before = gen_diff_data.stamp(str(repo), "main", ["feature"])
+    gen_diff_data.run(repo, "checkout", "-q", "feature")
+    try:
+        assert gen_diff_data.stamp(str(repo), "main", ["feature"]) != before
+    finally:
+        gen_diff_data.run(repo, "checkout", "-q", "main")
+    assert gen_diff_data.stamp(str(repo), "main", ["feature"]) == before
+
+
+def test_texts_read_together_read_as_they_do_one_by_one(repo, tmp_path):
+    wanted = {
+        ("main", "sample.py"),
+        ("feature", "sample.py"),
+        ("feature", "added.py"),
+        ("main", "added.py"),
+        ("feature", "pkg/sub/deep.py"),
+        ("", "kept.py"),
+        ("", "nowhere.py"),
+    }
+    texts = gen_diff_data.file_texts(str(repo), wanted)
+    assert texts == {(rev, path): gen_diff_data.file_text(str(repo), rev, path) for rev, path in wanted}
+    assert texts[("main", "added.py")] == "" and texts[("feature", "added.py")]
+    # Names are read whole, spaces and all, and a missing one costs only its own text.
+    git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "with space.py").write_bytes(b"first = 1\r\nsecond = 2\n")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "-c", "user.email=d@e", "-c", "user.name=D", "commit", "-q", "-m", "spaced")
+    wanted = {("main", "with space.py"), ("main", "nowhere.py"), ("main^", "with space.py")}
+    texts = gen_diff_data.file_texts(str(tmp_path), wanted)
+    assert texts == {(rev, path): gen_diff_data.file_text(str(tmp_path), rev, path) for rev, path in wanted}
+    assert texts[("main", "with space.py")] == "first = 1\nsecond = 2\n"
+
+
+def opening_read_through(text, line_no):
+    """What 'string_opening' answers, as it answered while it tokenized the text again for every line asked about."""
+    if line_no < 1:
+        return ""
+    opened = None
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.start[0] >= line_no:
+                break
+            if token.type == tokenize.STRING and line_no <= token.end[0]:
+                return re.match(r"[rRbBuUfF]*(\"\"\"|'''|\"|')", token.string).group(0)
+            if token.type == tokenize.FSTRING_START:
+                opened = token.string
+            elif token.type == tokenize.FSTRING_END:
+                opened = None
+    except (tokenize.TokenError, SyntaxError):
+        return ""
+    return opened or ""
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_the_string_a_line_stands_in_is_read_from_one_tokenizing(broken):
+    text = (
+        '"""Docstring\nover lines."""\nx = 1\n'
+        'r"""raw\ndoc"""\n'
+        'name = f"""\nopen {x} and\n{f"inner {x}"} still\n"""\n'
+        "short = 'one' 'two'\n"
+        "joined = ('a'\n  'b')\n"
+        "def f():\n    '''inside\n    a function'''\n    return x\n"
+    )
+    if broken:
+        text += "unclosed = (\n  1,\n"
+    rows = text.count("\n") + 3
+    assert [gen_diff_data.string_opening(text, line) for line in range(-1, rows)] == [
+        opening_read_through(text, line) for line in range(-1, rows)
+    ]
 
 
 def test_the_page_is_built_around_the_payload(payload):

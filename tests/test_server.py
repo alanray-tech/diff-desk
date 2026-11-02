@@ -1,6 +1,7 @@
 """The desk's endpoints: what it serves, what it records, and how a session reads the comments back out."""
 
 import concurrent.futures
+import gzip
 import json
 import os
 import shutil
@@ -33,6 +34,37 @@ def test_the_page_and_its_payload_are_served(desk):
     assert status == 200
     assert b"<title>" in body and b"__DIFF_DATA__" not in body
     assert desk.get("/data")["branches"][0]["ref"] == "feature"
+
+
+def test_a_reader_that_takes_gzip_is_answered_compressed(desk):
+    plain = read(desk, "/data")[1]
+    request = urllib.request.Request(f"{desk.url}/data", headers={"Accept-Encoding": "gzip"})
+    with urllib.request.urlopen(request, timeout=30) as answer:
+        assert answer.headers["Content-Encoding"] == "gzip"
+        assert gzip.decompress(answer.read()) == plain
+    # A small answer goes out as it is, compressed or not being asked for.
+    request = urllib.request.Request(f"{desk.url}/state", headers={"Accept-Encoding": "gzip"})
+    with urllib.request.urlopen(request, timeout=30) as answer:
+        assert answer.headers["Content-Encoding"] is None
+
+
+def test_a_page_load_collects_again_only_once_the_diffs_have_moved(desk):
+    assert desk.post("/scan", {"dir": str(desk.repo), "base": "main", "refs": ["feature"]})["ok"]
+    first = desk.page()
+    # The page carries the second it was built at, so one built again a second later reads otherwise.
+    time.sleep(1.1)
+    assert desk.page() == first
+    written = desk.repo / "wide.py"
+    gen_diff_data.run(desk.repo, "checkout", "-q", "feature")
+    try:
+        assert desk.page() != first
+        written.write_text(written.read_text() + "SAID_ON_DISK_FOR_THE_PAGE = 1\n")
+        assert "SAID_ON_DISK_FOR_THE_PAGE" in desk.page()
+    finally:
+        gen_diff_data.run(desk.repo, "checkout", "-q", "--", "wide.py")
+        gen_diff_data.run(desk.repo, "checkout", "-q", "main")
+        # What the desk serves is what the tests after this one write their comments against.
+        desk.page()
 
 
 def test_an_unknown_route_is_refused(desk):

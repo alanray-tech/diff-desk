@@ -73,6 +73,7 @@ keep their reason. The log on disk is written before GitHub is contacted, so a p
 """
 
 import contextlib
+import gzip
 import hashlib
 import json
 import os
@@ -632,16 +633,44 @@ def redecorate(key):
 gen_diff_data.LISTENERS.append(redecorate)
 
 
+def still_served(source):
+    """Whether the payload and page served are what collecting the source again would make, so need not be remade.
+
+    Told by the stamp, which hashes everything the diffs are read from (see 'gen_diff_data.stamp'). Never so for a
+    pull request served by number, whose head is only known by fetching it, nor for every branch ahead of the base,
+    since a branch made since is in none of the refs stamped.
+    """
+    refs = list(source.refs)
+    if not refs or any(gen_diff_data.pull_number(ref) is not None for ref in refs):
+        return False
+    if not (DATA.exists() and PAGE.exists()):
+        return False
+    try:
+        served = json.loads(DATA.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        served.get("desk") == gen_diff_data.RUNNING
+        and served.get("root") == str(pathlib.Path(source.root).expanduser())
+        and served.get("baseRef") == source.base
+        and served.get("stampedRefs") == refs
+        and served.get("stamp") == gen_diff_data.stamp(source.root, source.base, refs)
+    )
+
+
 def rebuild():
     """Collect the served diffs again and rewrite the page around them, keeping the last good pair on any failure.
 
     One at a time, since two page loads at once would write the same two files: what a caller gets is either the diffs
-    as they now stand, or exactly what was being served before.
+    as they now stand, or exactly what was being served before. Nothing is collected when what is served already is
+    the diffs as they now stand (see 'still_served').
     """
     source = Serving.source
     if source is None:
         return None
     with BUILDING:
+        if still_served(source):
+            return None
         try:
             payload = gen_diff_data.collect(source.root, source.base, source.refs)
         except Exception as error:  # noqa: BLE001 - a page must still be served, so this is reported and set aside
@@ -992,12 +1021,23 @@ def changing():
 ALIGNED = {}
 ALIGNED_KEPT = 8
 ALIGNING = threading.Lock()
+# Smaller answers go out as they are, since compressing them saves less than it costs.
+COMPRESSED_FROM = 1024
 
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body=b"", kind="text/plain; charset=utf-8"):
         self.send_response(code)
         self.send_header("Content-Type", kind)
+        # The page and the payload run to megabytes of text, which a reader on a forwarded port waits on byte by byte.
+        if (
+            len(body) > COMPRESSED_FROM
+            and kind.startswith(("text/", "application/json"))
+            and "gzip" in self.headers.get("Accept-Encoding", "")
+        ):
+            body = gzip.compress(body)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
