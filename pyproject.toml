@@ -1,3 +1,8 @@
+[dependency-groups]
+# What the tests and the linter need; the desk itself runs on the standard library alone. Ruff is pinned for the reason
+# given in .pre-commit-config.yaml.
+dev = ["pytest", "playwright", "ruff==0.15.7"]
+
 [tool.ruff]
 line-length = 120
 
