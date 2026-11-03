@@ -50,7 +50,13 @@ def refresh():
 
     def git(*words, quiet=False):
         done = subprocess.run(
-            ["git", "-C", str(here), *words], capture_output=True, text=True, timeout=120, check=False
+            ["git", "-C", str(here), *words],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            check=False,
         )
         if done.returncode != 0 and not quiet:
             print(f"not updated: git {words[0]} said {' '.join((done.stderr or done.stdout).split())[:120]}")
@@ -117,6 +123,15 @@ def carried(item, indent):
         print(f"{indent}{serve_diff.MEDIA / image['file']} ({image['name']}, {where})", flush=True)
 
 
+def written_on(note):
+    """The commit a remark was written on, as `@abc1234`: alone for a single commit's view, `+wip` where the whole
+    branch was read with the work saved on disk, `..` where it was read whole at that tip."""
+    if not note.get("commit"):
+        return ""
+    mark = {"commit": "", "worktree": "+wip"}.get(note.get("scope"), "..")
+    return f"@{note['commit']}{mark}"
+
+
 def show(note, since=None):
     text = " ".join(str(note.get("text", "")).split())
     marks = [note.get("state", "open")]
@@ -127,7 +142,9 @@ def show(note, since=None):
     # Flushed as it goes: a watch that keeps running holds its output in a buffer otherwise, and a session reading
     # along sees a heading with nothing under it.
     print(
-        f"[{note['seq']}] {note.get('branch', '?')} {note['path']}:{span(note)} ({note.get('side')}) {text}", flush=True
+        f"[{note['seq']}] {note.get('branch', '?')}{written_on(note)} {note['path']}:{span(note)} ({note.get('side')}) "
+        f"{text}",
+        flush=True,
     )
     print(f"      {' | '.join(marks)}", flush=True)
     carried(note, "      ")
@@ -160,16 +177,16 @@ def heard_upto(branches=()):
     kept = gen_diff_data.home() / "watched.json"
     if not kept.exists():
         return None
-    held = json.loads(kept.read_text())
+    held = json.loads(kept.read_text(encoding="utf-8"))
     return held.get(watched_key(branches))
 
 
 def stop_at(event, desk=None, branches=()):
     kept = gen_diff_data.home() / "watched.json"
-    held = json.loads(kept.read_text()) if kept.exists() else {}
+    held = json.loads(kept.read_text(encoding="utf-8")) if kept.exists() else {}
     held[watched_key(branches)] = event
     held["desk"] = desk if desk is not None else held.get("desk")
-    kept.write_text(json.dumps(held))
+    kept.write_text(json.dumps(held), encoding="utf-8")
 
 
 def serving():
@@ -181,7 +198,7 @@ def serving():
 def armed_against():
     """The run of the desk the last watch was armed against."""
     kept = gen_diff_data.home() / "watched.json"
-    return json.loads(kept.read_text()).get("desk") if kept.exists() else None
+    return json.loads(kept.read_text(encoding="utf-8")).get("desk") if kept.exists() else None
 
 
 PULL_REF = re.compile(r"^refs/diffdesk/pull/(\d+)$")
@@ -271,9 +288,9 @@ def serve(args):
     if not payload["branches"]:
         sys.exit(f"nothing ahead of {args.base} in {args.dir}")
     home = gen_diff_data.home()
-    (home / "diff_data.json").write_text(json.dumps(payload, separators=(",", ":")))
-    template = (HERE / "diff_desk_template.html").read_text()
-    (home / "diff_desk.html").write_text(gen_diff_data.render_page(template, payload))
+    (home / "diff_data.json").write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    template = (HERE / "diff_desk_template.html").read_text(encoding="utf-8")
+    (home / "diff_desk.html").write_text(gen_diff_data.render_page(template, payload), encoding="utf-8")
     _said(payload)
     serve_diff.main(serve_diff.Source(args.dir, args.base, args.refs), started_by=args.owner or None)
 
@@ -371,12 +388,19 @@ def watch(args):
     print("nothing said within the timeout")
 
 
+def same_commit(one, other):
+    return one.startswith(other) or other.startswith(one)
+
+
 def comments(args):
     rows = ask("/comments")
     if rows is None:
         sys.exit("nothing is serving")
     rows = rows if args.all else [row for row in rows if row.get("state") == "open"]
-    print(f"{len(rows)} comment(s){'' if args.all else ' unresolved'}")
+    if args.commit:
+        # A short sha is as long as git made it, so either side may be the longer.
+        rows = [row for row in rows if row.get("commit") and same_commit(row["commit"], args.commit)]
+    print(f"{len(rows)} comment(s){'' if args.all else ' unresolved'}{f' on {args.commit}' if args.commit else ''}")
     for note in rows:
         show(note)
 
@@ -434,6 +458,44 @@ def edit(args):
         sys.exit(outcome.get("error", "the edit was refused"))
     named = f"[{outcome['seq']}]" if args.reply is None else f"reply {args.reply} of [{outcome['seq']}]"
     print(f"rewrote {named}, {outcome['edits']} earlier wording(s) kept")
+
+
+def comment(args):
+    """Open a thread of the session's own, on lines of the diff or on a whole file.
+
+    It is the session's word, so a watch for what the reviewer says does not wake on it; the reviewer reads it on the
+    page and answers or resolves it like any remark of theirs.
+    """
+    data = ask("/data")
+    if data is None:
+        sys.exit("nothing is serving")
+    held = {entry["ref"]: entry for entry in data["branches"]}
+    if args.branch:
+        number = args.branch.lstrip("#")
+        pulls = (entry for entry in held.values() if entry.get("pr") and str(entry["pr"]["number"]) == number)
+        branch = held.get(args.branch) or next(pulls, None)
+        if branch is None:
+            sys.exit(f"no review of {args.branch} is served: {', '.join(held)}")
+    elif len(held) == 1:
+        branch = next(iter(held.values()))
+    else:
+        sys.exit(f"name the review it is about with --branch: {', '.join(held)}")
+    spot = re.fullmatch(r"(.+?):(\d+)(?:-(\d+))?", args.where)
+    path, line, end = (spot.group(1), int(spot.group(2)), int(spot.group(3) or 0)) if spot else (args.where, 0, 0)
+    note = {
+        "branch": branch["ref"],
+        "review": f"#{branch['pr']['number']}" if branch.get("pr") else branch["ref"],
+        "path": path,
+        "line": line,
+        "side": args.side if line else "file",
+        "text": " ".join(args.text),
+    }
+    if end and end != line:
+        note["line"], note["endLine"] = min(line, end), max(line, end)
+    outcome = ask("/comments", {"comments": [note], "who": "session"})
+    if outcome is None:
+        sys.exit("nothing is serving")
+    print(f"commented [{outcome['seq']}] on {args.where}")
 
 
 def reply(args):
@@ -543,6 +605,7 @@ job.set_defaults(run=watch)
 
 job = jobs.add_parser("comments", help="what has been submitted")
 job.add_argument("--all", action="store_true", help="include the ones already addressed")
+job.add_argument("--commit", default="", help="only the ones written on this commit")
 job.set_defaults(run=comments)
 
 job = jobs.add_parser("publish", help="send the named comments to the pull request")
@@ -564,6 +627,13 @@ job.add_argument(
     "--reply", type=int, default=None, help="rewrite this reply of the comment instead, by its place in the thread"
 )
 job.set_defaults(run=edit)
+
+job = jobs.add_parser("comment", help="open a thread of your own on lines of the diff or on a whole file")
+job.add_argument("where", help="path:line or path:start-end, or a path alone for the whole file")
+job.add_argument("text", nargs="+", help="the remark, shown on the page like the reviewer's")
+job.add_argument("--side", choices=("new", "old"), default="new", help="which side of the diff the lines are on")
+job.add_argument("--branch", help="the review it is about (branch or #pr), when the desk serves more than one")
+job.set_defaults(run=comment)
 
 job = jobs.add_parser("reply", help="answer a comment without closing it")
 job.add_argument("seq", type=int)

@@ -15,8 +15,16 @@ import tokenize
 
 
 def github():
-    """The command that talks to GitHub. Overridable so a test can answer for it without a network or a login."""
-    return shlex.split(os.environ.get("DIFF_DESK_GH", "gh"))
+    """The command that talks to GitHub. Overridable so a test can answer for it without a network or a login.
+
+    Split as the platform's own shell would: POSIX splitting reads the backslashes of a Windows path as escapes and
+    drops them, so there the words are split as they stand and only their quotes taken off.
+    """
+    said = os.environ.get("DIFF_DESK_GH", "gh")
+    if os.name != "nt":
+        return shlex.split(said)
+    words = shlex.split(said, posix=False)
+    return [word[1:-1] if len(word) > 1 and word[0] == word[-1] == '"' else word for word in words]
 
 
 def home():
@@ -28,7 +36,9 @@ def home():
 
 def run(root, *args):
     """Ask git something. A command that fails answers with nothing, which every caller reads as absence."""
-    return subprocess.run(["git", *args], capture_output=True, text=True, cwd=root, check=False).stdout
+    return subprocess.run(
+        ["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=root, check=False
+    ).stdout
 
 
 # What gh says when the call never left this machine: nothing resolved, nothing connected, no handshake made. GitHub
@@ -80,11 +90,23 @@ def gh(*args, repeatable, given=None, cwd=None, budget=120):
         left = max(1.0, ends - time.monotonic())
         try:
             told = subprocess.run(
-                words, input=given, capture_output=True, text=True, cwd=cwd, timeout=left, check=False
+                words,
+                input=given,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=cwd,
+                timeout=left,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             told = subprocess.CompletedProcess(words, 1, "", f"no answer from GitHub within {budget:g}s")
             print(f"gh gave no answer within {budget:g}s", flush=True)
+            break
+        except OSError as error:
+            told = subprocess.CompletedProcess(words, 127, "", f"cannot run {words[0]}: {error}")
+            print(f"gh could not be run: {error}", flush=True)
             break
         if told.returncode == 0 or pause is None:
             break
@@ -218,6 +240,8 @@ def fetch_pull(root, upstream, number):
         ["git", "fetch", "--quiet", f"https://github.com/{upstream}.git", f"+refs/pull/{number}/head:{local}"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=root,
         timeout=300,
         check=False,
@@ -273,8 +297,51 @@ def render_page(template, payload):
     """
     body = json.dumps(payload, separators=(",", ":")).replace("</script", "<\\/script")
     stamp = time.strftime("built %H:%M:%S")
-    grammar = (pathlib.Path(__file__).parent / "vendor" / "highlight.min.js").read_text()
+    grammar = (pathlib.Path(__file__).parent / "vendor" / "highlight.min.js").read_text(encoding="utf-8")
     return template.replace("__DIFF_DATA__", body).replace("__HIGHLIGHT__", grammar).replace("__BUILD__", stamp)
+
+
+# The strings of every text tokenized lately, filed by a digest of the text (see 'string_marks'). A branch reads the
+# same file at many revisions, and a page load collects them all again, so most texts asked about have been read.
+MARKED = {}
+MARKED_KEPT = 4096
+MARKED_LOCK = threading.Lock()
+
+
+def string_marks(text):
+    """The tokens that open, close or are strings in a text, from one tokenizing of all of it (see 'string_opening').
+
+    In the order the tokenizer gives them: ("s", start, end, delimiter) for a string, ("f", start, 0, opening) and
+    ("e", start, 0, "") for where an f-string opens and ends. Beside them, the line of the last token read when the
+    tokenizer gave up, or None when it read the text through.
+    """
+    key = hashlib.sha1(text.encode("utf-8", "surrogatepass")).digest()
+    with MARKED_LOCK:
+        held = MARKED.pop(key, None)
+        if held is not None:
+            MARKED[key] = held
+            return held
+    marks = []
+    last = 0
+    broken = None
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            last = token.start[0]
+            if token.type == tokenize.STRING:
+                said = re.match(r"[rRbBuUfF]*(\"\"\"|'''|\"|')", token.string).group(0)
+                marks.append(("s", last, token.end[0], said))
+            elif token.type == tokenize.FSTRING_START:
+                marks.append(("f", last, 0, token.string))
+            elif token.type == tokenize.FSTRING_END:
+                marks.append(("e", last, 0, ""))
+    except (tokenize.TokenError, SyntaxError):
+        broken = last
+    held = (marks, broken)
+    with MARKED_LOCK:
+        MARKED[key] = held
+        while len(MARKED) > MARKED_KEPT:
+            MARKED.pop(next(iter(MARKED)))
+    return held
 
 
 def string_opening(text, line_no):
@@ -282,23 +349,30 @@ def string_opening(text, line_no):
 
     A hunk is painted on its own and starts wherever the diff cut it, so a line inside a docstring opened above the hunk
     reads as code. Handing the painter the delimiter puts the line back inside its string.
+
+    Read as the tokenizer reads the text up to that line: a text it gives up on before reaching the line says nothing.
     """
     if line_no < 1:
         return ""
+    marks, broken = string_marks(text)
     opened = None
-    try:
-        for token in tokenize.generate_tokens(io.StringIO(text).readline):
-            if token.start[0] >= line_no:
-                break
-            if token.type == tokenize.STRING and line_no <= token.end[0]:
-                return re.match(r"[rRbBuUfF]*(\"\"\"|'''|\"|')", token.string).group(0)
-            if token.type == tokenize.FSTRING_START:
-                opened = token.string
-            elif token.type == tokenize.FSTRING_END:
-                opened = None
-    except (tokenize.TokenError, SyntaxError):
+    for kind, start, end, said in marks:
+        if start >= line_no:
+            break
+        if kind == "s" and line_no <= end:
+            return said
+        if kind == "f":
+            opened = said
+        elif kind == "e":
+            opened = None
+    if broken is not None and broken < line_no:
         return ""
     return opened or ""
+
+
+def as_text(raw):
+    """Bytes git gave for a file, read as `run` reads what git says: UTF-8, and every line ending a newline."""
+    return raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def file_text(root, rev, path):
@@ -306,27 +380,58 @@ def file_text(root, rev, path):
     if rev:
         return run(root, "show", f"{rev}:{path}")
     file = pathlib.Path(root) / path
-    return file.read_text(errors="replace") if file.is_file() else ""
+    return file.read_text(encoding="utf-8", errors="replace") if file.is_file() else ""
 
 
-def mark_strings(root, files, old_rev, new_rev):
+def file_texts(root, wanted):
+    """What each (rev, path) reads as (see 'file_text'), every committed one read by a single git process.
+
+    Starting git costs more than reading a file through it, the more so on Windows, and a branch names hundreds.
+    """
+    named = sorted({(rev, path) for rev, path in wanted if rev})
+    texts = {(rev, path): file_text(root, rev, path) for rev, path in wanted if not rev}
+    if not named:
+        return texts
+    asked = "".join(f"{rev}:{path}\n" for rev, path in named).encode("utf-8")
+    told = subprocess.run(
+        ["git", "cat-file", "--batch"], input=asked, capture_output=True, cwd=root, check=False
+    ).stdout
+    at = 0
+    for name in named:
+        texts[name] = ""
+        end = told.find(b"\n", at)
+        if end < 0:
+            continue
+        # "<oid> <type> <size>", or the name asked for followed by "missing" or "ambiguous".
+        header = told[at:end].rsplit(b" ", 2)
+        at = end + 1
+        if not header[-1].isdigit():
+            continue
+        size = int(header[-1])
+        if header[-2] == b"blob":
+            texts[name] = as_text(told[at : at + size])
+        at += size + 1
+    return texts
+
+
+def mark_strings(root, jobs):
     """Note on each hunk of a Python file the string delimiter its old and its new side start inside.
 
+    `jobs` holds (files, old_rev, new_rev) for every diff collected, so the texts all of them read are fetched at once.
     The note is a fifth member of the hunk header row (see 'string_opening' for what it holds and why).
     """
-    for entry in files:
-        if entry["binary"] or not entry["path"].endswith(".py"):
-            continue
-        texts = [None, None]
+    marked = [
+        (entry, revs)
+        for files, *revs in jobs
+        for entry in files
+        if not entry["binary"] and entry["path"].endswith(".py") and any(row[0] == "h" for row in entry["lines"])
+    ]
+    texts = file_texts(root, {(rev, entry["path"]) for entry, revs in marked for rev in revs})
+    for entry, revs in marked:
+        sides = [texts[(rev, entry["path"])] for rev in revs]
         for row in entry["lines"]:
-            if row[0] != "h":
-                continue
-            opens = []
-            for side, rev in enumerate((old_rev, new_rev)):
-                if texts[side] is None:
-                    texts[side] = file_text(root, rev, entry["path"])
-                opens.append(string_opening(texts[side], row[1 + side]))
-            row.append(opens)
+            if row[0] == "h":
+                row.append([string_opening(text, row[1 + side]) for side, text in enumerate(sides)])
 
 
 def parse(diff):
@@ -421,11 +526,13 @@ def stamp(root, base, refs):
     it said before, and a page comparing that would believe it was up to date while showing the previous diff.
 
     Cheap enough to ask for every few seconds, which is what lets a page notice the branch has moved on without
-    collecting the diffs and rebuilding itself around them.
+    collecting the diffs and rebuilding itself around them. The branch checked out is part of it too: the one checked
+    out is read from disk and the others from their refs, so a checkout changes the diffs while every tip stands.
     """
     root = str(pathlib.Path(root).expanduser())
     heads = [LOCAL_HEADS.get(pull_number(ref), ref) for ref in refs]
     marks = [run(root, "rev-parse", ref).strip() for ref in (base, *refs, *heads)]
+    marks.append(run(root, "rev-parse", "--abbrev-ref", "HEAD").strip())
     marks.append(run(root, "status", "--porcelain").strip())
     marks.append(run(root, "diff", "HEAD").strip())
     return hashlib.sha1("\x1f".join(marks).encode()).hexdigest()[:16]
@@ -481,12 +588,15 @@ def collect(root, base, refs):
         "name": pathlib.Path(run(root, "rev-parse", "--show-toplevel").strip() or root).name,
         "baseRef": base,
         "base": run(root, "rev-parse", "--short", base).strip(),
+        # The refs the stamp is taken over, which is what tells a desk the payload it holds answers what it serves.
+        "stampedRefs": refs,
         "branches": [],
     }
     data["stamp"] = stamp(root, base, refs)
     # The process collecting, which is what the state a page polls answers with: the tool on disk may have moved on from
     # it, and a page carrying that would read as behind the very desk that served it, reloading at every refresh.
     data["desk"] = RUNNING
+    marking = []
     for wanted in refs:
         number = pull_number(wanted)
         request = None
@@ -499,7 +609,6 @@ def collect(root, base, refs):
         for row in reversed([line for line in log if line]):
             sha, subject = row.split("\x1f")
             files = parse(run(root, "show", "--format=", "--unified=3", sha))
-            mark_strings(root, files, f"{sha}^", sha)
             commits.append({"sha": sha, "subject": subject, "files": files})
         fork = run(root, "merge-base", base, head).strip()
         # What the ref has committed, read from the ref rather than from disk, so work saved there says nothing about
@@ -523,10 +632,10 @@ def collect(root, base, refs):
             )
             revs = (start, "" if head == current else head)
         files = parse(whole)
-        mark_strings(root, files, *revs)
         # A ref that differs from the base nowhere has nothing to review, whatever it carries in commits.
         if not files:
             continue
+        marking.extend([(files, *revs), *[(commit["files"], f"{commit['sha']}^", commit["sha"]) for commit in commits]])
         data["branches"].append(
             {
                 "ref": ref,
@@ -542,6 +651,7 @@ def collect(root, base, refs):
                 "dirty": head == current,
             }
         )
+    mark_strings(root, marking)
     decorate(data)
     return data
 
@@ -549,9 +659,9 @@ def collect(root, base, refs):
 if __name__ == "__main__":
     payload = collect(os.environ.get("DIFF_ROOT", "."), os.environ.get("DIFF_BASE", "upstream/main"), sys.argv[1:])
     out = home() / "diff_data.json"
-    out.write_text(json.dumps(payload, separators=(",", ":")))
+    out.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     template = pathlib.Path(__file__).parent / "diff_desk_template.html"
-    (home() / "diff_desk.html").write_text(render_page(template.read_text(), payload))
+    (home() / "diff_desk.html").write_text(render_page(template.read_text(encoding="utf-8"), payload), encoding="utf-8")
     print(f"{sum(len(b['files']) for b in payload['branches'])} file diffs, ", end="")
     print(f"{sum(len(b['commits']) for b in payload['branches'])} commits, upstream {payload['upstream'] or '(none)'}")
     print("bytes:", out.stat().st_size)

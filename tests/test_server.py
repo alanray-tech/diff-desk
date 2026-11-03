@@ -1,6 +1,7 @@
 """The desk's endpoints: what it serves, what it records, and how a session reads the comments back out."""
 
 import concurrent.futures
+import gzip
 import json
 import os
 import shutil
@@ -33,6 +34,37 @@ def test_the_page_and_its_payload_are_served(desk):
     assert status == 200
     assert b"<title>" in body and b"__DIFF_DATA__" not in body
     assert desk.get("/data")["branches"][0]["ref"] == "feature"
+
+
+def test_a_reader_that_takes_gzip_is_answered_compressed(desk):
+    plain = read(desk, "/data")[1]
+    request = urllib.request.Request(f"{desk.url}/data", headers={"Accept-Encoding": "gzip"})
+    with urllib.request.urlopen(request, timeout=30) as answer:
+        assert answer.headers["Content-Encoding"] == "gzip"
+        assert gzip.decompress(answer.read()) == plain
+    # A small answer goes out as it is, compressed or not being asked for.
+    request = urllib.request.Request(f"{desk.url}/state", headers={"Accept-Encoding": "gzip"})
+    with urllib.request.urlopen(request, timeout=30) as answer:
+        assert answer.headers["Content-Encoding"] is None
+
+
+def test_a_page_load_collects_again_only_once_the_diffs_have_moved(desk):
+    assert desk.post("/scan", {"dir": str(desk.repo), "base": "main", "refs": ["feature"]})["ok"]
+    first = desk.page()
+    # The page carries the second it was built at, so one built again a second later reads otherwise.
+    time.sleep(1.1)
+    assert desk.page() == first
+    written = desk.repo / "wide.py"
+    gen_diff_data.run(desk.repo, "checkout", "-q", "feature")
+    try:
+        assert desk.page() != first
+        written.write_text(written.read_text() + "SAID_ON_DISK_FOR_THE_PAGE = 1\n")
+        assert "SAID_ON_DISK_FOR_THE_PAGE" in desk.page()
+    finally:
+        gen_diff_data.run(desk.repo, "checkout", "-q", "--", "wide.py")
+        gen_diff_data.run(desk.repo, "checkout", "-q", "main")
+        # What the desk serves is what the tests after this one write their comments against.
+        desk.page()
 
 
 def test_an_unknown_route_is_refused(desk):
@@ -221,6 +253,26 @@ def test_either_side_can_reply_without_closing_the_thread(desk):
     assert row["state"] == "open"
     assert desk.post("/reply", {"seq": made["seq"], "text": "   "})["ok"] is False
     assert desk.post("/reply", {"seq": 99999, "text": "nowhere"})["ok"] is False
+
+
+def test_a_comment_says_which_commit_it_was_written_on(desk):
+    tip = gen_diff_data.run(desk.repo, "rev-parse", "--short", "feature").strip()
+    # Recorded through the API with nothing said about it: written on the branch as it is served, read whole.
+    bare = desk.post("/comments", {"branch": "feature", "path": "sample.py", "line": 8, "side": "new", "text": "bare"})
+    # The page says which commit it was reading, and that stands as it was said.
+    named = desk.post(
+        "/comments",
+        {"branch": "feature", "path": "sample.py", "line": 9, "side": "new", "text": "named"}
+        | {"commit": "abc1234", "scope": "commit"},
+    )
+    rows = {row["seq"]: row for row in desk.get("/comments")}
+    assert (rows[bare["seq"]]["commit"], rows[bare["seq"]]["scope"]) == (tip, "branch")
+    assert (rows[named["seq"]]["commit"], rows[named["seq"]]["scope"]) == ("abc1234", "commit")
+
+    listed = desk.cli("comments", "--commit", tip).communicate(timeout=60)[0]
+    assert f"[{bare['seq']}] feature@{tip}.. sample.py:8" in listed
+    assert "named" not in listed
+    assert f"[{named['seq']}] feature@abc1234 sample.py:9" in desk.cli("comments").communicate(timeout=60)[0]
 
 
 def test_rewriting_a_comment_or_one_of_its_replies_keeps_what_it_said_before(desk):
@@ -1321,7 +1373,7 @@ def test_rescanning_switches_what_is_reviewed(desk):
     assert [branch["ref"] for branch in outcome["data"]["branches"]] == ["feature"]
     assert desk.get("/data")["branches"][0]["ref"] == "feature"
     # The page is rebuilt around the new payload, so a reload shows it without another command.
-    assert "feature" in (desk.home / "diff_desk.html").read_text()
+    assert "feature" in (desk.home / "diff_desk.html").read_text(encoding="utf-8")
 
 
 def test_serving_over_a_desk_holding_another_review_is_refused(desk):
@@ -1718,6 +1770,31 @@ def test_a_reply_is_news_even_on_a_comment_already_read(desk):
     # Read now, so it is behind the cursor again.
     caught_up = news[0]["event"]
     assert not [row for row in desk.get(f"/comments?event={caught_up}") if row.get("eventBy") == "you"]
+
+
+def test_a_remark_the_session_opens_is_not_news_for_itself(desk):
+    read_up_to = max(row["event"] for row in desk.get("/comments") or [{"event": 0}])
+    said = desk.cli("comment", "sample.py:61-63", "a note of my own", "--branch", "feature").communicate(timeout=60)[0]
+    whole = desk.cli("comment", "sample.py", "about the whole file", "--branch", "feature").communicate(timeout=60)[0]
+    assert said.startswith("commented [") and whole.startswith("commented [")
+    rows = desk.get(f"/comments?event={read_up_to}")
+    mine = [row for row in rows if row["text"] in ("a note of my own", "about the whole file")]
+    assert [(row["eventBy"], row["line"], row.get("endLine"), row["side"]) for row in mine] == [
+        ("session", 61, 63, "new"),
+        ("session", 0, None, "file"),
+    ]
+    assert not [row for row in rows if row.get("eventBy") == "you"]
+
+    # A reviewer's answer on it is news like any other.
+    desk.post("/reply", {"seq": mine[0]["seq"], "text": "agreed", "who": "you"})
+    assert [row["seq"] for row in desk.get(f"/comments?event={read_up_to}") if row.get("eventBy") == "you"] == [
+        mine[0]["seq"]
+    ]
+
+    # The page names no author, and what it records stays the reviewer's.
+    written = {"branch": "feature", "path": "sample.py", "line": 9, "side": "new", "text": "from the page"}
+    page = desk.post("/comments", {"comments": [written]})
+    assert {row["seq"]: row for row in desk.get("/comments")}[page["seq"]]["eventBy"] == "you"
 
 
 def test_the_branch_has_moved_on_when_a_modified_file_changes_again(desk):

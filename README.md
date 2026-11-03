@@ -68,7 +68,8 @@ Nothing leaves this desk on its own.
 - **What a comment carries goes out with it.** The files of a thread are uploaded as it is sent and the body posted carries a link to each under the words, so a screenshot says the same thing on the pull request as it does here. One that will not go stops that send rather than leaving a remark whose screenshot is nowhere but this desk, and a file uploaded once is never uploaded twice. A comment kept local keeps its files here, exactly as its text stays here.
 - **A resolution is believed only when GitHub reports the thread resolved.** Until then the comment reads "not resolved there yet" beside its own resolution.
 - **What GitHub refuses is said where you are**, as a notice carrying the reason that stays until dismissed.
-- **The panel reads by batch or by what moved last.** A batch names the submission a remark went out in; a reply belongs to its thread and carries no batch, so recency is where the answer just written into an old batch is found.
+- **The panel reads by batch, by commit, or by what moved last.** A batch names the submission a remark went out in; a reply belongs to its thread and carries no batch, so recency is where the answer just written into an old batch is found.
+- **Every remark records the commit it was written on.** Written while one commit is shown, it is that commit's; written on the whole branch, it is the branch's tip, marked when the work on disk was part of what was read. The panel groups by it, latest commit first, and `desk.py comments --commit SHA` lists one commit's remarks.
 
 ## Working with a session
 

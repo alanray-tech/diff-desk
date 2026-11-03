@@ -73,6 +73,7 @@ keep their reason. The log on disk is written before GitHub is contacted, so a p
 """
 
 import contextlib
+import gzip
 import hashlib
 import json
 import os
@@ -151,7 +152,7 @@ def read_notes():
     """Every recorded comment, numbered: a row written before the cursor existed is numbered by its position."""
     if not NOTES.exists():
         return []
-    rows = [json.loads(line) for line in NOTES.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in NOTES.read_text(encoding="utf-8").splitlines() if line.strip()]
     for index, row in enumerate(rows, start=1):
         row.setdefault("seq", index)
         row.setdefault("batch", 0)
@@ -609,9 +610,9 @@ def serve_payload(payload):
     """Make this payload the served one: the numbers it names are remembered, then it and the page are written."""
     remembered_pulls(payload["branches"])
     Serving.decor = payload["decor"]
-    DATA.write_text(json.dumps(payload, separators=(",", ":")))
+    DATA.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     if TEMPLATE.exists():
-        PAGE.write_text(gen_diff_data.render_page(TEMPLATE.read_text(), payload))
+        PAGE.write_text(gen_diff_data.render_page(TEMPLATE.read_text(encoding="utf-8"), payload), encoding="utf-8")
 
 
 def redecorate(key):
@@ -623,7 +624,7 @@ def redecorate(key):
     with BUILDING:
         if not DATA.exists():
             return
-        payload = json.loads(DATA.read_text())
+        payload = json.loads(DATA.read_text(encoding="utf-8"))
         if gen_diff_data.decorate(payload):
             serve_payload(payload)
             print(f"REDECORATED on {key}", flush=True)
@@ -632,16 +633,44 @@ def redecorate(key):
 gen_diff_data.LISTENERS.append(redecorate)
 
 
+def still_served(source):
+    """Whether the payload and page served are what collecting the source again would make, so need not be remade.
+
+    Told by the stamp, which hashes everything the diffs are read from (see 'gen_diff_data.stamp'). Never so for a
+    pull request served by number, whose head is only known by fetching it, nor for every branch ahead of the base,
+    since a branch made since is in none of the refs stamped.
+    """
+    refs = list(source.refs)
+    if not refs or any(gen_diff_data.pull_number(ref) is not None for ref in refs):
+        return False
+    if not (DATA.exists() and PAGE.exists()):
+        return False
+    try:
+        served = json.loads(DATA.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        served.get("desk") == gen_diff_data.RUNNING
+        and served.get("root") == str(pathlib.Path(source.root).expanduser())
+        and served.get("baseRef") == source.base
+        and served.get("stampedRefs") == refs
+        and served.get("stamp") == gen_diff_data.stamp(source.root, source.base, refs)
+    )
+
+
 def rebuild():
     """Collect the served diffs again and rewrite the page around them, keeping the last good pair on any failure.
 
     One at a time, since two page loads at once would write the same two files: what a caller gets is either the diffs
-    as they now stand, or exactly what was being served before.
+    as they now stand, or exactly what was being served before. Nothing is collected when what is served already is
+    the diffs as they now stand (see 'still_served').
     """
     source = Serving.source
     if source is None:
         return None
     with BUILDING:
+        if still_served(source):
+            return None
         try:
             payload = gen_diff_data.collect(source.root, source.base, source.refs)
         except Exception as error:  # noqa: BLE001 - a page must still be served, so this is reported and set aside
@@ -860,7 +889,7 @@ def reader():
     if not DATA.exists():
         return ""
     try:
-        return json.loads(DATA.read_text()).get("viewer") or ""
+        return json.loads(DATA.read_text(encoding="utf-8")).get("viewer") or ""
     except json.JSONDecodeError:
         return ""
 
@@ -916,13 +945,13 @@ def touched(rows, row, by):
 
 def read_ticks():
     """Which files have been read, as `<review> <path>` against the digest of the diff they were read at."""
-    return json.loads(TICKS.read_text()) if TICKS.exists() else {}
+    return json.loads(TICKS.read_text(encoding="utf-8")) if TICKS.exists() else {}
 
 
 def write_ticks(marks):
     """Replace the ticks in one step, so a reader never sees them half-written."""
     spare = TICKS.with_suffix(".writing")
-    spare.write_text(json.dumps(marks, indent=1, sort_keys=True))
+    spare.write_text(json.dumps(marks, indent=1, sort_keys=True), encoding="utf-8")
     os.replace(spare, TICKS)
 
 
@@ -947,7 +976,7 @@ def remembered_pulls(branches):
     a review read once as `#3237` would read as an untouched branch afterwards. So a number, once seen for a ref, is the
     ref's number until another one is seen for it.
     """
-    known = json.loads(PULLS.read_text()) if PULLS.exists() else {}
+    known = json.loads(PULLS.read_text(encoding="utf-8")) if PULLS.exists() else {}
     learnt = dict(known)
     for branch in branches:
         if branch["pr"]:
@@ -956,14 +985,14 @@ def remembered_pulls(branches):
             branch["pr"] = known[branch["ref"]]
     if learnt != known:
         spare = PULLS.with_suffix(".writing")
-        spare.write_text(json.dumps(learnt, indent=1, sort_keys=True))
+        spare.write_text(json.dumps(learnt, indent=1, sort_keys=True), encoding="utf-8")
         os.replace(spare, PULLS)
 
 
 def write_notes(rows):
     """Replace the log in one step, so a reader never sees it half-written."""
     spare = NOTES.with_suffix(".writing")
-    spare.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    spare.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     os.replace(spare, NOTES)
 
 
@@ -992,12 +1021,23 @@ def changing():
 ALIGNED = {}
 ALIGNED_KEPT = 8
 ALIGNING = threading.Lock()
+# Smaller answers go out as they are, since compressing them saves less than it costs.
+COMPRESSED_FROM = 1024
 
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body=b"", kind="text/plain; charset=utf-8"):
         self.send_response(code)
         self.send_header("Content-Type", kind)
+        # The page and the payload run to megabytes of text, which a reader on a forwarded port waits on byte by byte.
+        if (
+            len(body) > COMPRESSED_FROM
+            and kind.startswith(("text/", "application/json"))
+            and "gzip" in self.headers.get("Accept-Encoding", "")
+        ):
+            body = gzip.compress(body)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -1106,7 +1146,11 @@ class Handler(BaseHTTPRequestHandler):
         old_rev = query.get("oldrev", [""])[0]
         old_from = int(query.get("oldfrom", ["0"])[0])
         anchors = json.loads(query.get("anchors", ["[]"])[0])
-        text = gen_diff_data.run(root, "show", f"{rev}:{name}") if rev else (root / name).read_text()
+        text = (
+            gen_diff_data.run(root, "show", f"{rev}:{name}")
+            if rev
+            else (root / name).read_text(encoding="utf-8", errors="replace")
+        )
         rows = text.split("\n")
         if rows and rows[-1] == "":
             rows.pop()
@@ -1284,6 +1328,17 @@ class Handler(BaseHTTPRequestHandler):
             batch, bound = body["comments"], bool(body.get("github"))
         else:
             batch, bound = (body if isinstance(body, list) else [body]), False
+        # A batch the session records of its own is stamped as its word, so a watch for what the reviewer says does
+        # not wake on it; anything else was written on the page.
+        by = "session" if isinstance(body, dict) and "comments" in body and body.get("who") == "session" else "you"
+        # The commit a remark was written on, where the writer did not say: a comment recorded through the API is
+        # taken as written on its branch as it is served now.
+        served = json.loads(DATA.read_text(encoding="utf-8")) if DATA.exists() else {"branches": []}
+        tips = {entry["ref"]: entry for entry in served["branches"]}
+        for note in batch:
+            held = tips.get(note.get("branch"))
+            if held and not note.get("commit"):
+                note["commit"], note["scope"] = held["tip"], "worktree" if held.get("dirty") else "branch"
         with changing() as rows:
             seq = max((row.get("seq", 0) for row in rows), default=0)
             group = max((row.get("batch", 0) for row in rows), default=0) + 1
@@ -1298,7 +1353,7 @@ class Handler(BaseHTTPRequestHandler):
                 note["github"] = "pending" if bound else "none"
                 note["replies"] = []
                 rows.append(note)
-                touched(rows, note, "you")
+                touched(rows, note, by)
         print(f"BATCH {group}: {len(batch)} comment(s) submitted{', bound for GitHub' if bound else ''}", flush=True)
         for note in batch:
             span = str(note.get("line", "?"))

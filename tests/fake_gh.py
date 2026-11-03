@@ -5,11 +5,22 @@ refused, or to be unreachable, without a network or a login. A script may carry 
 since resolving a repository, listing its pull requests and posting a review are all `gh` yet answered differently.
 """
 
-import fcntl
 import json
 import os
 import pathlib
 import sys
+
+if os.name == "nt":
+    import msvcrt
+
+    def lock(held):
+        msvcrt.locking(held.fileno(), msvcrt.LK_LOCK, 1)
+else:
+    import fcntl
+
+    def lock(held):
+        fcntl.flock(held, fcntl.LOCK_EX)
+
 
 asked = json.loads(pathlib.Path(os.environ["FAKE_GH_SCRIPT"]).read_text())
 asking = " ".join(sys.argv[1:])
@@ -27,7 +38,7 @@ if os.environ.get("FAKE_GH_LOG"):
 # read and written under a lock: two stand-ins racing on it would read it half-written and answer nothing.
 spent = pathlib.Path(os.environ["FAKE_GH_SCRIPT"]).with_suffix(".spent")
 with spent.with_suffix(".lock").open("w") as held:
-    fcntl.flock(held, fcntl.LOCK_EX)
+    lock(held)
     kept = json.loads(spent.read_text()) if spent.exists() else {}
     wanted = asked
     for index, rule in enumerate(asked.get("rules", [])):
