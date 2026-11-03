@@ -1328,6 +1328,9 @@ class Handler(BaseHTTPRequestHandler):
             batch, bound = body["comments"], bool(body.get("github"))
         else:
             batch, bound = (body if isinstance(body, list) else [body]), False
+        # A batch the session records of its own is stamped as its word, so a watch for what the reviewer says does
+        # not wake on it; anything else was written on the page.
+        by = "session" if isinstance(body, dict) and "comments" in body and body.get("who") == "session" else "you"
         # The commit a remark was written on, where the writer did not say: a comment recorded through the API is
         # taken as written on its branch as it is served now.
         served = json.loads(DATA.read_text(encoding="utf-8")) if DATA.exists() else {"branches": []}
@@ -1350,7 +1353,7 @@ class Handler(BaseHTTPRequestHandler):
                 note["github"] = "pending" if bound else "none"
                 note["replies"] = []
                 rows.append(note)
-                touched(rows, note, "you")
+                touched(rows, note, by)
         print(f"BATCH {group}: {len(batch)} comment(s) submitted{', bound for GitHub' if bound else ''}", flush=True)
         for note in batch:
             span = str(note.get("line", "?"))

@@ -460,6 +460,44 @@ def edit(args):
     print(f"rewrote {named}, {outcome['edits']} earlier wording(s) kept")
 
 
+def comment(args):
+    """Open a thread of the session's own, on lines of the diff or on a whole file.
+
+    It is the session's word, so a watch for what the reviewer says does not wake on it; the reviewer reads it on the
+    page and answers or resolves it like any remark of theirs.
+    """
+    data = ask("/data")
+    if data is None:
+        sys.exit("nothing is serving")
+    held = {entry["ref"]: entry for entry in data["branches"]}
+    if args.branch:
+        number = args.branch.lstrip("#")
+        pulls = (entry for entry in held.values() if entry.get("pr") and str(entry["pr"]["number"]) == number)
+        branch = held.get(args.branch) or next(pulls, None)
+        if branch is None:
+            sys.exit(f"no review of {args.branch} is served: {', '.join(held)}")
+    elif len(held) == 1:
+        branch = next(iter(held.values()))
+    else:
+        sys.exit(f"name the review it is about with --branch: {', '.join(held)}")
+    spot = re.fullmatch(r"(.+?):(\d+)(?:-(\d+))?", args.where)
+    path, line, end = (spot.group(1), int(spot.group(2)), int(spot.group(3) or 0)) if spot else (args.where, 0, 0)
+    note = {
+        "branch": branch["ref"],
+        "review": f"#{branch['pr']['number']}" if branch.get("pr") else branch["ref"],
+        "path": path,
+        "line": line,
+        "side": args.side if line else "file",
+        "text": " ".join(args.text),
+    }
+    if end and end != line:
+        note["line"], note["endLine"] = min(line, end), max(line, end)
+    outcome = ask("/comments", {"comments": [note], "who": "session"})
+    if outcome is None:
+        sys.exit("nothing is serving")
+    print(f"commented [{outcome['seq']}] on {args.where}")
+
+
 def reply(args):
     order = {"seq": args.seq, "text": " ".join(args.text), "who": "session", "whisper": args.whisper}
     if args.on is not None:
@@ -589,6 +627,13 @@ job.add_argument(
     "--reply", type=int, default=None, help="rewrite this reply of the comment instead, by its place in the thread"
 )
 job.set_defaults(run=edit)
+
+job = jobs.add_parser("comment", help="open a thread of your own on lines of the diff or on a whole file")
+job.add_argument("where", help="path:line or path:start-end, or a path alone for the whole file")
+job.add_argument("text", nargs="+", help="the remark, shown on the page like the reviewer's")
+job.add_argument("--side", choices=("new", "old"), default="new", help="which side of the diff the lines are on")
+job.add_argument("--branch", help="the review it is about (branch or #pr), when the desk serves more than one")
+job.set_defaults(run=comment)
 
 job = jobs.add_parser("reply", help="answer a comment without closing it")
 job.add_argument("seq", type=int)

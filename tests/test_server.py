@@ -1772,6 +1772,31 @@ def test_a_reply_is_news_even_on_a_comment_already_read(desk):
     assert not [row for row in desk.get(f"/comments?event={caught_up}") if row.get("eventBy") == "you"]
 
 
+def test_a_remark_the_session_opens_is_not_news_for_itself(desk):
+    read_up_to = max(row["event"] for row in desk.get("/comments") or [{"event": 0}])
+    said = desk.cli("comment", "sample.py:61-63", "a note of my own", "--branch", "feature").communicate(timeout=60)[0]
+    whole = desk.cli("comment", "sample.py", "about the whole file", "--branch", "feature").communicate(timeout=60)[0]
+    assert said.startswith("commented [") and whole.startswith("commented [")
+    rows = desk.get(f"/comments?event={read_up_to}")
+    mine = [row for row in rows if row["text"] in ("a note of my own", "about the whole file")]
+    assert [(row["eventBy"], row["line"], row.get("endLine"), row["side"]) for row in mine] == [
+        ("session", 61, 63, "new"),
+        ("session", 0, None, "file"),
+    ]
+    assert not [row for row in rows if row.get("eventBy") == "you"]
+
+    # A reviewer's answer on it is news like any other.
+    desk.post("/reply", {"seq": mine[0]["seq"], "text": "agreed", "who": "you"})
+    assert [row["seq"] for row in desk.get(f"/comments?event={read_up_to}") if row.get("eventBy") == "you"] == [
+        mine[0]["seq"]
+    ]
+
+    # The page names no author, and what it records stays the reviewer's.
+    written = {"branch": "feature", "path": "sample.py", "line": 9, "side": "new", "text": "from the page"}
+    page = desk.post("/comments", {"comments": [written]})
+    assert {row["seq"]: row for row in desk.get("/comments")}[page["seq"]]["eventBy"] == "you"
+
+
 def test_the_branch_has_moved_on_when_a_modified_file_changes_again(desk):
     gen_diff_data.run(desk.repo, "checkout", "-q", "feature")
     written = desk.repo / "added.py"
