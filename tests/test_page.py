@@ -918,6 +918,46 @@ def test_the_comments_panel_reads_by_batch_or_by_what_moved_last(page, desk):
     page.set_viewport_size({"width": 1500, "height": 900})
 
 
+def test_the_file_list_is_as_wide_as_it_is_dragged(page):
+    # Its edge is a sash: the list follows the pointer and the diffs give way, the width outlives the reload, the keys
+    # step it, and a double-click gives back the default. Dragging it never selects lines in the diff beside it.
+    def width():
+        settle(page)
+        return page.locator("aside").bounding_box()["width"]
+
+    def drag(by):
+        box = page.locator("#filesash").bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + 200
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + by / 2, y, steps=4)
+        page.mouse.move(x + by, y, steps=4)
+        page.mouse.up()
+
+    start = width()
+    drag(150)
+    wide = width()
+    assert abs(wide - (start + 150)) <= 2
+    aside = page.locator("aside").bounding_box()
+    assert page.locator("#main").bounding_box()["x"] >= aside["x"] + aside["width"] - 1
+    assert page.evaluate("() => sel.path") is None
+    page.reload(wait_until="load")
+    page.wait_for_selector("section.file")
+    assert abs(width() - wide) <= 2
+    page.locator("#filesash").focus()
+    page.keyboard.press("ArrowLeft")
+    assert abs(width() - (wide - 16)) <= 2
+    page.locator("#filesash").dblclick()
+    assert abs(width() - start) <= 2
+    # Never narrower than a name can be read in, never more than half the window. The pointer stays in the window:
+    # Firefox's synthetic input lets go nowhere outside it.
+    drag(-200)
+    assert abs(width() - 160) <= 2
+    drag(900)
+    assert abs(width() - 720) <= 2
+    page.locator("#filesash").dblclick()
+
+
 def test_a_comment_resolved_here_does_not_claim_the_pull_request_agrees(page, desk):
     branch = page.evaluate("() => data.branches[0].ref")
     made = desk.post(

@@ -308,8 +308,32 @@
   .progress .label { white-space: pre-line; line-height: 1.25; text-align: right; }
   .progress .label[data-stale="true"] { color: var(--stale); }
 
-  .shell { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); align-items: start; }
-  @media (max-width: 900px) { .shell { grid-template-columns: minmax(0, 1fr); } }
+  /* The file list is as wide as it was dragged to (--files, set by the page); the sash between it and the diffs sits in
+     a column of no width of its own, so showing or hiding it moves nothing. */
+  .shell { display: grid; grid-template-columns: var(--files, 280px) 0 minmax(0, 1fr); align-items: start; }
+  .shell > .rail, .shell > aside { grid-column: 1; }
+  .shell > main { grid-column: 3; }
+  #filesash {
+    grid-column: 2;
+    position: sticky;
+    top: var(--head);
+    z-index: 5;
+    width: 9px;
+    height: calc(100vh - var(--head));
+    margin-left: -5px;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  #filesash::after { content: ""; position: absolute; inset: 0 3px; border-radius: 2px; transition: background 0.1s 0.15s; }
+  #filesash:hover::after, #filesash:focus-visible::after, body.sizing-files #filesash::after { background: var(--accent); }
+  #filesash:focus-visible { outline: none; }
+  body.sizing-files { cursor: col-resize; user-select: none; }
+  body.hide-files #filesash { display: none; }
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    .shell > main { grid-column: 1; }
+    #filesash { display: none; }
+  }
   /* The file list folds away from its own head, and a rail at the edge brings it back. */
   .asidehead { display: flex; align-items: center; justify-content: space-between; margin: 0 0 8px 4px; }
   .asidehead h2 { margin: 0; }
@@ -318,7 +342,7 @@
   #hidefiles svg, .rail svg { width: 12px; height: 12px; }
   #hidefiles:hover, .rail:hover { color: var(--ink); background: var(--surface-sunk); }
   .rail { display: none; }
-  body.hide-files .shell { grid-template-columns: 28px minmax(0, 1fr); }
+  body.hide-files .shell { grid-template-columns: 28px 0 minmax(0, 1fr); }
   body.hide-files aside { display: none; }
   body.hide-files .rail {
     display: grid;
@@ -1156,6 +1180,7 @@
       <kbd>c</kbd> comment · <kbd>r</kbd> mark reviewed
     </div>
   </aside>
+  <div id="filesash" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the file list" title="Drag to resize the file list; double-click for its default width"></div>
   <main id="main"></main>
 </div>
 
@@ -5223,6 +5248,72 @@
     keepChoices();
   });
   els.showfiles.addEventListener("click", () => els.hidefiles.click());
+
+  // The file list's width: dragged at its edge, stepped with the arrow keys there, back to the default on a
+  // double-click, and kept for the next visit. Never so wide the diffs beside it go narrower than the list.
+  const filesash = document.getElementById("filesash");
+  const shell = filesash.parentElement;
+  const filesBounds = () => ({ min: 160, max: Math.max(160, Math.min(720, window.innerWidth / 2)) });
+  const filesWidth = () => shell.querySelector("aside").getBoundingClientRect().width;
+  function sizeFiles(px, keep) {
+    const { min, max } = filesBounds();
+    const width = px == null ? null : Math.round(Math.min(max, Math.max(min, px)));
+    if (width == null) shell.style.removeProperty("--files");
+    else shell.style.setProperty("--files", `${width}px`);
+    filesash.setAttribute("aria-valuemin", String(min));
+    filesash.setAttribute("aria-valuemax", String(Math.round(max)));
+    filesash.setAttribute("aria-valuenow", String(Math.round(width ?? filesWidth())));
+    if (!keep) return;
+    try {
+      if (width == null) localStorage.removeItem("diffdesk.filesWidth");
+      else localStorage.setItem("diffdesk.filesWidth", String(width));
+    } catch (error) {
+      // Unsaved, the width lasts until the reload, which is all that is lost.
+    }
+  }
+  try {
+    const kept = Number(localStorage.getItem("diffdesk.filesWidth"));
+    if (kept) sizeFiles(kept, false);
+  } catch (error) {
+    // Nothing kept to read: the default width stands.
+  }
+  filesash.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    filesash.setPointerCapture(event.pointerId);
+    document.body.classList.add("sizing-files");
+    let frame = 0;
+    const left = shell.getBoundingClientRect().left;
+    let x = event.clientX;
+    const move = (ev) => {
+      x = ev.clientX;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => sizeFiles(x - left, false));
+    };
+    // Where the pointer let go, not the last frame drawn: a quick drag can end before any frame has come.
+    const end = () => {
+      cancelAnimationFrame(frame);
+      filesash.removeEventListener("pointermove", move);
+      document.body.classList.remove("sizing-files");
+      sizeFiles(x - left, true);
+    };
+    filesash.addEventListener("pointermove", move);
+    filesash.addEventListener("pointerup", end, { once: true });
+    filesash.addEventListener("pointercancel", end, { once: true });
+  });
+  filesash.addEventListener("dblclick", () => sizeFiles(null, true));
+  filesash.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? 64 : 16;
+    const by = { ArrowLeft: -step, ArrowRight: step }[event.key];
+    if (by === undefined && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const { min, max } = filesBounds();
+    sizeFiles(event.key === "Home" ? min : event.key === "End" ? max : filesWidth() + by, true);
+  });
+  window.addEventListener("resize", () => {
+    if (shell.style.getPropertyValue("--files")) sizeFiles(filesWidth(), false);
+  });
   els.sourceopen.addEventListener("click", () => {
     const open = els.source.dataset.open !== "true";
     els.source.dataset.open = String(open);
